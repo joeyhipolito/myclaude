@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>aggregator tests</title>
+<style>
+  body { font-family: monospace; background: #111; color: #ccc; padding: 1rem 2rem; }
+  h1 { color: #eee; }
+  .suite { margin: 1.5rem 0; }
+  .suite-name { font-size: 1.1em; color: #aaa; margin-bottom: .5rem; }
+  .case { display: flex; gap: 1rem; align-items: baseline; padding: .15rem 0; }
+  .pass { color: #4ade80; }
+  .fail { color: #f87171; }
+  .label { flex: 1; }
+  .detail { color: #f87171; font-size: .85em; margin-left: 1rem; }
+  #summary { margin-top: 2rem; font-size: 1.2em; font-weight: bold; }
+  .all-pass { color: #4ade80; }
+  .has-fail  { color: #f87171; }
+</style>
+</head>
+<body>
+<h1>aggregator.test.html</h1>
+<div id="output"></div>
+<div id="summary"></div>
+
+<script type="module">
+import { aggregateRecords, PRICING, newBucket, projectNameFromFolder } from './aggregator.js';
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+const results = [];
+
+function suite(name, fn) {
+  const el = document.createElement('div');
+  el.className = 'suite';
+  const title = document.createElement('div');
+  title.className = 'suite-name';
+  title.textContent = '▸ ' + name;
+  el.appendChild(title);
+  document.getElementById('output').appendChild(el);
+  fn({ assert(label, actual, expected) {
+    const pass = deepEq(actual, expected);
+    results.push(pass);
+    const row = document.createElement('div');
+    row.className = 'case';
+    row.innerHTML = `<span class="${pass ? 'pass' : 'fail'}">${pass ? '✓' : '✗'}</span>`
+      + `<span class="label">${label}</span>`;
+    if (!pass) {
+      const d = document.createElement('div');
+      d.className = 'detail';
+      d.textContent = `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`;
+      row.appendChild(d);
+    }
+    el.appendChild(row);
+    console.log(`${pass ? 'PASS' : 'FAIL'} [${name}] ${label}${pass ? '' : ` — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`}`);
+  }});
+}
+
+function deepEq(a, b) {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object' || a === null || b === null) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every(k => deepEq(a[k], b[k]));
+}
+
+function near(a, b, eps = 1e-9) { return Math.abs(a - b) < eps; }
+
+// ── inline fixtures ──────────────────────────────────────────────────────────
+
+// Fixture 1: basic usage, tool calls, user prompts, cost calculation
+const FIXTURE_BASIC = [
+  // user prompt 1
+  { type: 'user', promptId: 'p1', timestamp: '2026-02-10T10:00:00.000Z',
+    message: { role: 'user', content: 'Hello Claude' }, uuid: 'u1', sessionId: 's1' },
+  // assistant — text only, no tools
+  { type: 'assistant', timestamp: '2026-02-10T10:00:05.000Z',
+    message: { id: 'msg_001', model: 'claude-opus-4-7', role: 'assistant',
+      content: [{ type: 'text', text: 'Hello!' }],
+      usage: { input_tokens: 10, output_tokens: 5,
+               cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+               cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a1', sessionId: 's1' },
+  // user prompt 2
+  { type: 'user', promptId: 'p2', timestamp: '2026-02-10T10:01:00.000Z',
+    message: { role: 'user', content: 'Use a tool' }, uuid: 'u2', sessionId: 's1' },
+  // assistant — tool use + cache creation
+  { type: 'assistant', timestamp: '2026-02-10T10:01:05.000Z',
+    message: { id: 'msg_002', model: 'claude-opus-4-7', role: 'assistant',
+      content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }],
+      usage: { input_tokens: 20, output_tokens: 15,
+               cache_creation_input_tokens: 1000, cache_read_input_tokens: 0,
+               cache_creation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a2', sessionId: 's1' },
+];
+
+// Fixture 2: streaming dedup — same message.id written twice (thinking + tool_use)
+// Usage must be counted once; tool_calls counted for both
+const FIXTURE_DEDUP = [
+  { type: 'user', promptId: 'p1', timestamp: '2026-03-15T08:00:00.000Z',
+    message: { role: 'user', content: 'thinking + tool' }, uuid: 'u1', sessionId: 's2' },
+  // first streaming chunk: thinking block (usage on this one)
+  { type: 'assistant', timestamp: '2026-03-15T08:00:05.000Z',
+    message: { id: 'msg_DUP', model: 'claude-sonnet-4-6', role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'hmm...' }],
+      usage: { input_tokens: 50, output_tokens: 30,
+               cache_creation_input_tokens: 0, cache_read_input_tokens: 2000,
+               cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a1', sessionId: 's2' },
+  // second streaming chunk: tool_use block (same msg_DUP — must NOT double-count usage)
+  { type: 'assistant', timestamp: '2026-03-15T08:00:05.100Z',
+    message: { id: 'msg_DUP', model: 'claude-sonnet-4-6', role: 'assistant',
+      content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/etc/hosts' } }],
+      usage: { input_tokens: 50, output_tokens: 30,
+               cache_creation_input_tokens: 0, cache_read_input_tokens: 2000,
+               cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a2', sessionId: 's2' },
+];
+
+// Fixture 3: streak — 3 consecutive days then a gap
+const FIXTURE_STREAK = [
+  { type: 'user', promptId: 'p1', timestamp: '2026-01-10T09:00:00.000Z',
+    message: { role: 'user', content: 'day 1' }, uuid: 'u1', sessionId: 's3' },
+  { type: 'assistant', timestamp: '2026-01-10T09:00:05.000Z',
+    message: { id: 'msg_S1', model: 'claude-haiku-4-5', role: 'assistant',
+      content: [], usage: { input_tokens: 5, output_tokens: 2,
+        cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a1', sessionId: 's3' },
+  { type: 'user', promptId: 'p2', timestamp: '2026-01-11T09:00:00.000Z',
+    message: { role: 'user', content: 'day 2' }, uuid: 'u2', sessionId: 's3' },
+  { type: 'assistant', timestamp: '2026-01-11T09:00:05.000Z',
+    message: { id: 'msg_S2', model: 'claude-haiku-4-5', role: 'assistant',
+      content: [], usage: { input_tokens: 5, output_tokens: 2,
+        cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a2', sessionId: 's3' },
+  { type: 'user', promptId: 'p3', timestamp: '2026-01-12T09:00:00.000Z',
+    message: { role: 'user', content: 'day 3' }, uuid: 'u3', sessionId: 's3' },
+  { type: 'assistant', timestamp: '2026-01-12T09:00:05.000Z',
+    message: { id: 'msg_S3', model: 'claude-haiku-4-5', role: 'assistant',
+      content: [], usage: { input_tokens: 5, output_tokens: 2,
+        cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a3', sessionId: 's3' },
+  // gap: skip 2026-01-13
+  { type: 'user', promptId: 'p4', timestamp: '2026-01-14T09:00:00.000Z',
+    message: { role: 'user', content: 'day 5 (gap)' }, uuid: 'u4', sessionId: 's3' },
+  { type: 'assistant', timestamp: '2026-01-14T09:00:05.000Z',
+    message: { id: 'msg_S4', model: 'claude-haiku-4-5', role: 'assistant',
+      content: [], usage: { input_tokens: 5, output_tokens: 2,
+        cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } },
+    uuid: 'a4', sessionId: 's3' },
+];
+
+// ── test suites ──────────────────────────────────────────────────────────────
+
+suite('Fixture 1 — basic tokens, cost, tools, user_prompts', ({ assert }) => {
+  const r = aggregateRecords([{ projectFolder: '-Users-me-projects-myapp', records: FIXTURE_BASIC }]);
+
+  assert('totals.messages = 2', r.totals.messages, 2);
+  assert('totals.user_prompts = 2', r.totals.user_prompts, 2);
+  assert('totals.input_tokens = 30', r.totals.input_tokens, 30);
+  assert('totals.output_tokens = 20', r.totals.output_tokens, 20);
+  assert('totals.cache_creation = 1000', r.totals.cache_creation, 1000);
+  assert('totals.cache_read = 0', r.totals.cache_read, 0);
+  assert('totals.tool_calls = 1', r.totals.tool_calls, 1);
+
+  // Cost: msg_001 opus-4-7: 10*5/1e6 + 5*25/1e6 = 0.000050 + 0.000125 = 0.000175
+  //        msg_002 opus-4-7: 20*5/1e6 + 15*25/1e6 + 1000*6.25/1e6 = 0.000100+0.000375+0.00625 = 0.006725
+  //        total ≈ 0.0069
+  const expectedCost = (10*5 + 5*25 + 20*5 + 15*25 + 1000*6.25) / 1_000_000;
+  assert(`totals.cost ≈ ${expectedCost.toFixed(8)}`, near(r.totals.cost, expectedCost), true);
+
+  // daily bucket for 2026-02-10
+  assert('daily[2026-02-10].messages = 2', r.daily['2026-02-10']?.messages, 2);
+  assert('monthly[2026-02].messages = 2', r.monthly['2026-02']?.messages, 2);
+  assert('yearly[2026].messages = 2', r.yearly['2026']?.messages, 2);
+
+  // byProject
+  assert('byProject length = 1', r.byProject.length, 1);
+  assert('byProject[0].name = myapp', r.byProject[0].name, 'myapp');
+  assert('byProject[0].tool_calls = 1', r.byProject[0].tool_calls, 1);
+
+  // byModel
+  assert('byModel has claude-opus-4-7', 'claude-opus-4-7' in r.byModel, true);
+  assert('byModel.claude-opus-4-7.messages = 2', r.byModel['claude-opus-4-7']?.messages, 2);
+
+  // byTool
+  assert('byTool.Bash = 1', r.byTool['Bash'], 1);
+
+  // dates
+  assert('firstSeen = 2026-02-10', r.firstSeen, '2026-02-10');
+  assert('lastSeen = 2026-02-10', r.lastSeen, '2026-02-10');
+});
+
+suite('Fixture 2 — streaming dedup (same msg_DUP, usage counted once)', ({ assert }) => {
+  const r = aggregateRecords([{ projectFolder: '-Users-me-projects-dedup', records: FIXTURE_DEDUP }]);
+
+  // Only 1 assistant message should be counted for usage
+  assert('totals.messages = 1', r.totals.messages, 1);
+  assert('totals.input_tokens = 50 (not 100)', r.totals.input_tokens, 50);
+  assert('totals.output_tokens = 30 (not 60)', r.totals.output_tokens, 30);
+  assert('totals.cache_read = 2000 (not 4000)', r.totals.cache_read, 2000);
+
+  // Tool call from second record must still be counted
+  assert('totals.tool_calls = 1', r.totals.tool_calls, 1);
+  assert('byTool.Read = 1', r.byTool['Read'], 1);
+
+  // User prompt counted
+  assert('totals.user_prompts = 1', r.totals.user_prompts, 1);
+
+  // Cost: sonnet-4-6: 50*3/1e6 + 30*15/1e6 + 2000*0.30/1e6 = 0.000150+0.000450+0.000600 = 0.001200
+  const expectedCost = (50*3 + 30*15 + 2000*0.30) / 1_000_000;
+  assert(`totals.cost ≈ ${expectedCost.toFixed(8)}`, near(r.totals.cost, expectedCost), true);
+
+  // daily date
+  assert('daily has 2026-03-15', '2026-03-15' in r.daily, true);
+  assert('monthly has 2026-03', '2026-03' in r.monthly, true);
+});
+
+suite('Fixture 3 — streak: longest=3, current=0 (last day is past)', ({ assert }) => {
+  const r = aggregateRecords([{ projectFolder: '-Users-me-projects-streak', records: FIXTURE_STREAK }]);
+
+  assert('streak.longest = 3', r.streak.longest, 3);
+  // current = 0 because last activity was 2026-01-14, well in the past
+  assert('streak.current = 0', r.streak.current, 0);
+
+  // 4 distinct days in the result
+  const dayCount = Object.keys(r.daily).length;
+  assert('4 daily buckets', dayCount, 4);
+
+  // haiku-4-5 used
+  assert('byModel has claude-haiku-4-5', 'claude-haiku-4-5' in r.byModel, true);
+
+  // totals: 4 messages (one per day)
+  assert('totals.messages = 4', r.totals.messages, 4);
+  assert('totals.user_prompts = 4', r.totals.user_prompts, 4);
+
+  assert('firstSeen = 2026-01-10', r.firstSeen, '2026-01-10');
+  assert('lastSeen = 2026-01-14', r.lastSeen, '2026-01-14');
+});
+
+suite('Utilities', ({ assert }) => {
+  assert('projectNameFromFolder basic', projectNameFromFolder('-Users-me-projects-myapp'), 'myapp');
+  assert('projectNameFromFolder hash', projectNameFromFolder('-Users-me-worktrees-abc123ef'), 'abc123ef');
+  assert('projectNameFromFolder no-dash', projectNameFromFolder('noDash'), 'noDash');
+  assert('PRICING opus-4-7 exists', 'claude-opus-4-7' in PRICING, true);
+  assert('newBucket has all fields',
+    Object.keys(newBucket()).sort().join(','),
+    'cache_creation,cache_read,cost,input_tokens,messages,output_tokens,tool_calls,user_prompts');
+});
+
+// ── summary ──────────────────────────────────────────────────────────────────
+
+const total = results.length;
+const passed = results.filter(Boolean).length;
+const failed = total - passed;
+const summaryEl = document.getElementById('summary');
+if (failed === 0) {
+  summaryEl.className = 'all-pass';
+  summaryEl.textContent = `✓ ALL ${total} TESTS PASS`;
+  console.log(`\nPASS — ${total}/${total}`);
+} else {
+  summaryEl.className = 'has-fail';
+  summaryEl.textContent = `✗ ${failed} FAILED, ${passed} passed (${total} total)`;
+  console.error(`\nFAIL — ${passed}/${total} passed, ${failed} failed`);
+}
+</script>
+</body>
+</html>

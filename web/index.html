@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MyClaude — Claude Code Stats</title>
+<link rel="icon" href="assets/favicon.ico" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300..900;1,8..60,300..900&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body class="state--landing">
+
+<a class="skip-link" href="#main">Skip to dashboard</a>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">
+      <img src="assets/claude-symbol.svg" alt="Claude" class="brand__mark" width="28" height="28" />
+      <div class="brand__text">
+        <div class="brand__product">MyClaude</div>
+        <div class="brand__sub">Claude Code · Usage Stats</div>
+      </div>
+    </div>
+
+    <div class="header-name">
+      <label for="display-name" class="header-name__label">Display name</label>
+      <input
+        id="display-name"
+        class="header-name__input"
+        type="text"
+        spellcheck="false"
+        autocomplete="off"
+        maxlength="48"
+        placeholder="your name" />
+    </div>
+
+    <div class="header-actions">
+      <button id="btn-pick" class="btn btn--primary" type="button">
+        Choose <span class="mono">~/.claude/projects</span>
+      </button>
+      <button id="btn-png" class="btn btn--ghost" type="button" disabled>
+        Download PNG
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="main" tabindex="-1">
+
+  <!-- Landing / empty state -->
+  <section id="landing" class="landing" aria-live="polite">
+    <div class="landing__inner">
+      <h1 class="landing__title">All-time stats from your Claude Code conversations.</h1>
+      <p class="landing__lede">
+        MyClaude reads your local <span class="mono">~/.claude/projects/</span> JSONL corpus
+        in the browser — nothing leaves this tab. Pick the directory to begin.
+      </p>
+      <ol class="landing__steps">
+        <li><span class="landing__num">01</span><span>Click <em>Choose</em> in the header.</span></li>
+        <li><span class="landing__num">02</span><span>Grant read access to your <span class="mono">.claude/projects</span> folder.</span></li>
+        <li><span class="landing__num">03</span><span>Wait while we parse — large corpora take a few seconds.</span></li>
+      </ol>
+      <p class="landing__note">
+        Requires Chromium-based browser (File System Access API).
+        <a href="aggregator.test.html">Run the aggregator self-test →</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Loading state -->
+  <section id="loading" class="loading" aria-live="polite" hidden>
+    <div class="loading__inner">
+      <div class="loading__spinner mono" id="loading-spinner" aria-hidden="true">⠋</div>
+      <div class="loading__bar"><div class="loading__fill" id="loading-fill"></div></div>
+      <div class="loading__text">
+        <span class="mono" id="loading-status">Reading directory…</span>
+        <span class="mono dim" id="loading-count">0 files</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Error state -->
+  <section id="error-state" class="error-state" hidden>
+    <div class="error-state__inner">
+      <div class="error-state__title">Could not load.</div>
+      <pre class="error-state__msg mono" id="error-msg"></pre>
+      <button id="btn-retry" class="btn btn--ghost" type="button">Try again</button>
+    </div>
+  </section>
+
+  <!-- Dashboard -->
+  <section id="dashboard" class="dashboard" hidden>
+
+    <!-- Filter chips + project pin -->
+    <div class="toolbar">
+      <div class="filters" role="tablist" aria-label="Time range">
+        <button type="button" class="chip chip--active" data-mode="all" role="tab" aria-selected="true">All-time</button>
+        <span class="chip-group">
+          <button type="button" class="chip" data-mode="year" role="tab" aria-selected="false">Year</button>
+          <select id="year-select" class="chip-select" aria-label="Year"></select>
+        </span>
+        <span class="chip-group">
+          <button type="button" class="chip" data-mode="month" role="tab" aria-selected="false">Month</button>
+          <select id="month-select" class="chip-select" aria-label="Month"></select>
+        </span>
+      </div>
+      <div class="project-pin" id="project-pin" hidden>
+        <span class="project-pin__label">Filtered to project</span>
+        <span class="project-pin__name mono" id="project-pin-name"></span>
+        <button type="button" id="project-clear" class="project-pin__clear" aria-label="Clear project filter">×</button>
+      </div>
+      <div class="range-meta mono dim" id="range-meta"></div>
+    </div>
+
+    <!-- Greeting -->
+    <div class="greet" id="greet" hidden>
+      <span class="greet__hi">Hi,</span>
+      <span class="greet__name" id="greet-name">there</span>
+      <span class="greet__since dim" id="greet-since"></span>
+    </div>
+
+    <!-- Section 1: Totals + Streak -->
+    <section class="grid grid--top">
+      <article class="card card--totals" aria-labelledby="totals-title">
+        <header class="card__head">
+          <h2 id="totals-title" class="card__title">Totals</h2>
+          <span class="card__hint mono dim" id="totals-window">In window</span>
+        </header>
+        <div class="totals">
+          <div class="metric">
+            <div class="metric__num" id="m-cost">$0</div>
+            <div class="metric__label">Estimated cost</div>
+          </div>
+          <div class="metric">
+            <div class="metric__num" id="m-msgs">0</div>
+            <div class="metric__label">Assistant messages</div>
+          </div>
+          <div class="metric">
+            <div class="metric__num" id="m-prompts">0</div>
+            <div class="metric__label">Your prompts</div>
+          </div>
+          <div class="metric">
+            <div class="metric__num" id="m-tokens">0</div>
+            <div class="metric__label">Tokens (in + out)</div>
+          </div>
+        </div>
+        <div class="totals__sub mono dim" id="totals-sub"></div>
+      </article>
+
+      <article class="card card--streak" aria-labelledby="streak-title">
+        <header class="card__head">
+          <h2 id="streak-title" class="card__title">Streak</h2>
+        </header>
+        <div class="streak">
+          <div class="streak__pair">
+            <div class="streak__num" id="streak-current">0</div>
+            <div class="streak__label">Current</div>
+          </div>
+          <div class="streak__divider" aria-hidden="true"></div>
+          <div class="streak__pair">
+            <div class="streak__num" id="streak-longest">0</div>
+            <div class="streak__label">Longest</div>
+          </div>
+        </div>
+        <div class="streak__hint mono dim">consecutive days with activity</div>
+      </article>
+    </section>
+
+    <!-- Section 2: Heatmap -->
+    <section class="card card--heatmap" aria-labelledby="heatmap-title">
+      <header class="card__head card__head--row">
+        <h2 id="heatmap-title" class="card__title">Activity</h2>
+        <div class="heatmap-legend mono dim">
+          <span>Less</span>
+          <span class="heatmap-legend__cells">
+            <span class="hm-swatch" data-l="0"></span>
+            <span class="hm-swatch" data-l="1"></span>
+            <span class="hm-swatch" data-l="2"></span>
+            <span class="hm-swatch" data-l="3"></span>
+            <span class="hm-swatch" data-l="4"></span>
+          </span>
+          <span>More</span>
+        </div>
+      </header>
+      <div class="heatmap-scroll">
+        <svg id="heatmap" class="heatmap" role="img" aria-label="Daily activity heatmap"></svg>
+      </div>
+      <div class="heatmap-tooltip mono" id="hm-tip" hidden></div>
+    </section>
+
+    <!-- Section 3: Projects + Model split -->
+    <section class="grid grid--mid">
+      <article class="card card--projects" aria-labelledby="projects-title">
+        <header class="card__head card__head--row">
+          <h2 id="projects-title" class="card__title">Top projects</h2>
+          <span class="card__hint mono dim">By cost · click to filter</span>
+        </header>
+        <div class="projects" id="projects"></div>
+      </article>
+
+      <article class="card card--models" aria-labelledby="models-title">
+        <header class="card__head card__head--row">
+          <h2 id="models-title" class="card__title">Model split</h2>
+          <span class="card__hint mono dim">By output tokens</span>
+        </header>
+        <div class="model-bar" id="model-bar" role="img" aria-label="Model usage proportions"></div>
+        <ul class="model-legend" id="model-legend"></ul>
+      </article>
+    </section>
+
+    <!-- Section 4: Tools -->
+    <section class="card card--tools" aria-labelledby="tools-title">
+      <header class="card__head card__head--row">
+        <h2 id="tools-title" class="card__title">Tool usage</h2>
+        <span class="card__hint mono dim">Top 10 by call count</span>
+      </header>
+      <div class="tools" id="tools"></div>
+    </section>
+
+    <footer class="dash-foot mono dim">
+      <span>Generated <span id="foot-now"></span></span>
+      <span class="dot">·</span>
+      <span>Local-only · no network upload</span>
+      <span class="dot">·</span>
+      <span>Claude logo © Anthropic, used under fair-use brand reference</span>
+    </footer>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/dom-to-image-more@3.4.4/dist/dom-to-image-more.min.js"></script>
+<script type="module" src="main.js"></script>
+</body>
+</html>
