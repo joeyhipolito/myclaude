@@ -786,18 +786,65 @@ async function onPng() {
   dom.btnPng.disabled = true;
   const original = dom.btnPng.textContent;
   dom.btnPng.textContent = 'Rendering…';
+
+  // Build a share-only stage off-screen: toolbar + greeting + totals + streak + heatmap.
+  // Clone the live nodes so we don't disturb the dashboard.
+  const stage = document.createElement('div');
+  stage.className = 'share-stage';
+  stage.style.cssText = `
+    position: fixed; left: -10000px; top: 0;
+    width: 1280px;
+    background: ${getCss('--bg') || '#FAF9F5'};
+    padding: 64px 72px;
+    box-sizing: border-box;
+    font-family: ${getComputedStyle(document.body).fontFamily};
+    color: ${getCss('--ink') || '#1a1a1a'};
+  `;
+
+  const sources = [
+    document.querySelector('.toolbar'),
+    document.querySelector('#greet'),
+    document.querySelector('.grid--top'),         // totals + streak row
+    document.querySelector('.card--heatmap'),
+  ].filter(Boolean);
+
+  for (const src of sources) {
+    if (src.hasAttribute('hidden')) continue;
+    const clone = src.cloneNode(true);
+    clone.style.marginBottom = '32px';
+    // Drop interactive affordances inside the clone so it reads as static.
+    clone.querySelectorAll('button, select, input').forEach(el => {
+      el.style.pointerEvents = 'none';
+    });
+    // Hide the project pin if not active.
+    const pin = clone.querySelector('#project-pin');
+    if (pin && pin.hasAttribute('hidden')) pin.remove();
+    stage.appendChild(clone);
+  }
+
+  // Footer brand line.
+  const foot = document.createElement('div');
+  foot.style.cssText = `margin-top: 24px; font-family: ${getCss('--font-mono') || 'monospace'}; font-size: 12px; color: ${getCss('--muted') || '#888'}; display:flex; justify-content:space-between;`;
+  foot.innerHTML = `<span>myclaude · stats.howtoai.sh</span><span>${todayISO()}</span>`;
+  stage.appendChild(foot);
+
+  document.body.appendChild(stage);
+
   try {
-    const node = dom.dashboard;
+    // Wait one frame so cloned SVG layout settles.
+    await new Promise(r => requestAnimationFrame(r));
     const scale = 2;
-    const blob = await window.domtoimage.toBlob(node, {
-      bgcolor: getCss('--bg'),
-      width: node.offsetWidth * scale,
-      height: node.offsetHeight * scale,
+    const w = stage.offsetWidth;
+    const h = stage.offsetHeight;
+    const blob = await window.domtoimage.toBlob(stage, {
+      bgcolor: getCss('--bg') || '#FAF9F5',
+      width: w * scale,
+      height: h * scale,
       style: {
         transform: `scale(${scale})`,
         transformOrigin: 'top left',
-        width: node.offsetWidth + 'px',
-        height: node.offsetHeight + 'px',
+        width: w + 'px',
+        height: h + 'px',
       },
     });
     const a = document.createElement('a');
@@ -810,6 +857,7 @@ async function onPng() {
     console.error(err);
     alert('PNG export failed: ' + (err.message || err));
   } finally {
+    stage.remove();
     dom.btnPng.textContent = original;
     dom.btnPng.disabled = false;
   }
