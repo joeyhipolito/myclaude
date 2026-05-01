@@ -3,3 +3,4 @@ node_modules/
 output/
 .vercel/
 .serve.pid
+.vercel
