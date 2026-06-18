@@ -534,10 +534,25 @@ function onDisplayNameChange() {
 
 function renderTotals(v) {
   const t = v.totals;
-  dom.mCost.textContent    = fmtMoney(t.cost);
+  const allTime = state.filter.mode === 'all' && !state.project;
+  const ar = state.agg && state.agg.archive;
+
+  // Roll the archived (pre-pruning) period into the all-time COST + TOKENS headline.
+  // Its window is disjoint from the live transcripts, so summing is safe. Assistant
+  // messages stays live-only (the archived count is all-roles — a different
+  // definition, not cleanly addable); prompts already span the full range.
+  let cost   = t.cost;
+  let tokens = t.input_tokens + t.output_tokens;
+  if (allTime && ar && ar.cost > 0) {
+    cost   += ar.cost;
+    tokens += (ar.input_tokens || 0) + (ar.output_tokens || 0);
+  }
+
+  dom.mCost.textContent    = fmtMoney(cost);
   dom.mMsgs.textContent    = fmtInt(t.messages);
   dom.mPrompts.textContent = fmtInt(t.user_prompts);
-  dom.mTokens.textContent  = fmtIntCompact(t.input_tokens + t.output_tokens);
+  dom.mTokens.textContent  = fmtIntCompact(tokens);
+
   const cacheRead = t.cache_read || 0;
   const cacheCreate = t.cache_creation || 0;
   const tools = t.tool_calls || 0;
@@ -545,20 +560,15 @@ function renderTotals(v) {
     `cache read ${fmtIntCompact(cacheRead)} · ` +
     `cache write ${fmtIntCompact(cacheCreate)} · ` +
     `tool calls ${fmtInt(tools)}`;
-  // Disclose subagent (Task) share of the all-time totals so it isn't mistaken
-  // for hand-driven work. Only meaningful for the unfiltered all-time view.
   const sa = state.agg && state.agg.subagent;
-  if (sa && sa.messages > 0 && state.filter.mode === 'all' && !state.project) {
+  if (sa && sa.messages > 0 && allTime) {
     sub += ` · incl. ${fmtInt(sa.messages)} subagent msgs (${fmtMoney(sa.cost)})`;
   }
-  // Pre-pruning aggregate (stats-cache.json) — disclosed addendum, NOT merged into
-  // the live cost/token numbers (non-overlapping earlier window). Prompts + the
-  // heatmap already span the full range via history.jsonl.
-  if (state.filter.mode === 'all' && !state.project) {
-    const ar = state.agg && state.agg.archive;
-    if (ar && ar.cost > 0) {
-      sub += ` · + archived ${ar.from}→${ar.to}: ${fmtMoney(ar.cost)} · ${fmtInt(ar.messages)} msgs · ${fmtInt(ar.sessions)} sessions (Claude Code /stats cache)`;
-    }
+  if (allTime && ar && ar.cost > 0) {
+    sub += ` · cost+tokens incl. archived ${ar.from}→${ar.to} ` +
+      `(+${fmtMoney(ar.cost)}, +${fmtIntCompact((ar.input_tokens || 0) + (ar.output_tokens || 0))} tok, ` +
+      `${fmtInt(ar.messages)} msgs, ${fmtInt(ar.sessions)} sessions, Claude Code /stats cache); ` +
+      `assistant msgs = live window`;
   }
   dom.totalsSub.textContent = sub;
 }
