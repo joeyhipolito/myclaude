@@ -9,7 +9,10 @@ async function pickAndAggregate(opts) {
   if (!('showDirectoryPicker' in window)) {
     throw new Error('Directory picker not available — use a Chromium-based browser (Chrome, Edge, Arc, Brave).');
   }
-  const dirHandle = await window.showDirectoryPicker({ id: 'myclaude-projects', mode: 'read' });
+  // Pick ~/.claude (the root) so the aggregator can also read history.jsonl +
+  // stats-cache.json for the long-range view. Picking ~/.claude/projects still
+  // works (legacy / recent-only). New id so the picker doesn't reuse the old target.
+  const dirHandle = await window.showDirectoryPicker({ id: 'myclaude-claude-root', mode: 'read' });
   const onProgress = opts && opts.onProgress;
 
   const candidates = [
@@ -30,7 +33,8 @@ async function pickAndAggregate(opts) {
 const state = {
   agg: null,             // full aggregate from aggregator.js
   filter: { mode: 'all', year: null, month: null }, // mode: all|year|month
-  project: null,         // active project filter (string name) or null
+  project: null,         // active project filter (folder PATH, unique) or null
+  projectName: null,     // display label for the pinned project
   derivedCache: new Map(), // key → derived view
 };
 
@@ -224,10 +228,12 @@ function setFilter(next, skipRender) {
   if (!skipRender) render();
 }
 
-function setProject(name) {
-  state.project = name;
-  if (name) {
-    dom.projectPinName.textContent = name;
+function setProject(proj) {
+  // proj is a ranked-project object { path, name } (unique by path), or null.
+  state.project = proj ? proj.path : null;
+  state.projectName = proj ? proj.name : null;
+  if (proj) {
+    dom.projectPinName.textContent = proj.name;
     show(dom.projectPin);
   } else {
     hide(dom.projectPin);
@@ -273,7 +279,7 @@ function deriveView() {
   let source;
 
   if (state.project) {
-    source = (agg.byProject || []).find((p) => p.name === state.project) || null;
+    source = (agg.byProject || []).find((p) => p.path === state.project) || null;
   }
 
   // Determine date window
@@ -443,9 +449,24 @@ function computeStreak(daily, range) {
     if (run > longest) longest = run;
     prev = d;
   }
-  // current streak: walk back from range.to (or last date) while present
+  // current streak: it's only "current" if activity includes today (or yesterday,
+  // one grace day before you've used it today). For a bounded window whose end is
+  // already in the past (year/month filters), anchor at the window end so the
+  // number still describes that window. Previously this always anchored at
+  // range.to (= last active day in 'all' mode), so a streak that ended weeks ago
+  // still showed as a nonzero "current" streak.
   const today = todayISO();
-  const endRef = (range && range.to && range.to < today) ? range.to : today;
+  const yesterday = addDays(today, -1);
+  let endRef;
+  if (range && range.to && range.to < today) {
+    endRef = range.to;                 // historical window — describe its tail
+  } else if (set.has(today)) {
+    endRef = today;
+  } else if (set.has(yesterday)) {
+    endRef = yesterday;                // active yesterday, not yet today
+  } else {
+    return { current: 0, longest };    // streak has lapsed
+  }
   let cur = 0;
   let cursor = endRef;
   while (set.has(cursor)) {
@@ -491,9 +512,9 @@ function renderMeta(v) {
   }
   dom.rangeMeta.textContent = `${r.from} → ${r.to}`;
   // If project-scoped without daily, label notes that totals are project all-time
-  const source = state.project ? (state.agg.byProject || []).find((p) => p.name === state.project) : null;
+  const source = state.project ? (state.agg.byProject || []).find((p) => p.path === state.project) : null;
   const noScopedDaily = source && !source.daily;
-  dom.totalsWindow.textContent = noScopedDaily ? `${state.project} · all-time` : r.label;
+  dom.totalsWindow.textContent = noScopedDaily ? `${state.projectName} · all-time` : r.label;
 }
 
 function renderGreet() {
@@ -520,10 +541,26 @@ function renderTotals(v) {
   const cacheRead = t.cache_read || 0;
   const cacheCreate = t.cache_creation || 0;
   const tools = t.tool_calls || 0;
-  dom.totalsSub.textContent =
+  let sub =
     `cache read ${fmtIntCompact(cacheRead)} · ` +
     `cache write ${fmtIntCompact(cacheCreate)} · ` +
     `tool calls ${fmtInt(tools)}`;
+  // Disclose subagent (Task) share of the all-time totals so it isn't mistaken
+  // for hand-driven work. Only meaningful for the unfiltered all-time view.
+  const sa = state.agg && state.agg.subagent;
+  if (sa && sa.messages > 0 && state.filter.mode === 'all' && !state.project) {
+    sub += ` · incl. ${fmtInt(sa.messages)} subagent msgs (${fmtMoney(sa.cost)})`;
+  }
+  // Pre-pruning aggregate (stats-cache.json) — disclosed addendum, NOT merged into
+  // the live cost/token numbers (non-overlapping earlier window). Prompts + the
+  // heatmap already span the full range via history.jsonl.
+  if (state.filter.mode === 'all' && !state.project) {
+    const ar = state.agg && state.agg.archive;
+    if (ar && ar.cost > 0) {
+      sub += ` · + archived ${ar.from}→${ar.to}: ${fmtMoney(ar.cost)} · ${fmtInt(ar.messages)} msgs · ${fmtInt(ar.sessions)} sessions (Claude Code /stats cache)`;
+    }
+  }
+  dom.totalsSub.textContent = sub;
 }
 
 function renderStreak(v) {
@@ -630,8 +667,10 @@ function renderHeatmap(v) {
 }
 
 function activityScore(bucket) {
-  // Use messages as primary score; fall back to tokens/cost
+  // Prefer the long-range prompt calendar (uniform across the full history);
+  // fall back to assistant messages, then tokens/cost for any pre-history days.
   if (!bucket) return 0;
+  if (typeof bucket.activity === 'number' && bucket.activity > 0) return bucket.activity;
   if (typeof bucket.messages === 'number' && bucket.messages > 0) return bucket.messages;
   const tok = (bucket.input_tokens || 0) + (bucket.output_tokens || 0);
   if (tok > 0) return Math.ceil(tok / 1000);
@@ -668,6 +707,15 @@ function onHmLeave() { hide(dom.hmTip); }
 function renderProjects(v) {
   const list = v.projectsRanked.slice(0, 10);
   const max = list.length ? list[0].cost : 1;
+  // Disclose how many non-interactive folders were excluded from aggregation.
+  const sk = state.agg && state.agg.skipped;
+  const hint = document.querySelector('.card--projects .card__hint');
+  if (hint) {
+    const n = sk ? (sk.worktree || 0) + (sk.workspace || 0) + (sk.test || 0) : 0;
+    hint.textContent = n > 0
+      ? `By cost · ${n} worker/worktree/temp folders excluded`
+      : 'By cost · click to filter';
+  }
   dom.projectsEl.innerHTML = '';
   if (!list.length) {
     dom.projectsEl.innerHTML = '<div class="dim mono" style="padding:12px">No projects in window.</div>';
@@ -676,7 +724,7 @@ function renderProjects(v) {
   list.forEach((p, i) => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'proj' + (state.project === p.name ? ' proj--active' : '');
+    btn.className = 'proj' + (state.project === p.path ? ' proj--active' : '');
     btn.innerHTML = `
       <span class="proj__rank">${String(i+1).padStart(2,'0')}</span>
       <span class="proj__main">
@@ -686,7 +734,7 @@ function renderProjects(v) {
       <span class="proj__cost">${fmtMoney(p.cost)}</span>
     `;
     btn.addEventListener('click', () => {
-      setProject(state.project === p.name ? null : p.name);
+      setProject(state.project === p.path ? null : p);
     });
     dom.projectsEl.appendChild(btn);
   });

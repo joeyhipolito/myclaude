@@ -38,7 +38,7 @@
 
     <div class="header-actions">
       <button id="btn-pick" class="btn btn--primary" type="button">
-        Choose <span class="mono">~/.claude/projects</span>
+        Choose <span class="mono">~/.claude</span>
       </button>
       <button id="btn-png" class="btn btn--ghost" type="button" disabled>
         Download PNG
@@ -54,12 +54,15 @@
     <div class="landing__inner">
       <h1 class="landing__title">All-time stats from your Claude Code conversations.</h1>
       <p class="landing__lede">
-        MyClaude reads your local <span class="mono">~/.claude/projects/</span> JSONL corpus
-        in the browser — nothing leaves this tab. Pick the directory to begin.
+        MyClaude reads your local <span class="mono">~/.claude</span> folder
+        in the browser — nothing leaves this tab. It parses the
+        <span class="mono">projects/</span> transcripts plus
+        <span class="mono">history.jsonl</span> and <span class="mono">stats-cache.json</span>
+        for the full-history view. Pick the directory to begin.
       </p>
       <ol class="landing__steps">
         <li><span class="landing__num">01</span><span>Click <em>Choose</em> in the header.</span></li>
-        <li><span class="landing__num">02</span><span>Grant read access to your <span class="mono">.claude/projects</span> folder.</span></li>
+        <li><span class="landing__num">02</span><span>Grant read access to your <span class="mono">~/.claude</span> folder (or <span class="mono">~/.claude/projects</span> for recent-only).</span></li>
         <li><span class="landing__num">03</span><span>Wait while we parse — large corpora take a few seconds.</span></li>
       </ol>
       <p class="landing__note">
